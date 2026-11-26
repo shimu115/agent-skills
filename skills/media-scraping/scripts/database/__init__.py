@@ -1,9 +1,9 @@
 """Database layer for the media-scraping skill.
 
 Log generation, validation, and Markdown parsing stay in ``scrape_log.py``
-and remain standard-library only.  Only ``scrape_log.py migrate`` imports
-this package, so SQLAlchemy is an optional dependency for the other
-commands.
+and remain standard-library only.  Only ``scrape_log.py migrate`` and the
+``runs`` / ``items`` query commands import this package, so SQLAlchemy is
+an optional dependency for the other commands.
 """
 
 from __future__ import annotations

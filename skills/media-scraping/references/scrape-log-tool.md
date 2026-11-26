@@ -1,33 +1,34 @@
 # Scrape Log Tool
 
-`media-scraping` 的标准日志生成与 Markdown → 数据库迁移工具。脚本是 [`../scripts/scrape_log.py`](../scripts/scrape_log.py)，随 skill 安装，要求 Python 3.8+。`init` / `add` / `finish` / `validate` 只用 Python 标准库；`migrate` 使用 [`../scripts/database/`](../scripts/database/) 的 SQLAlchemy Core 层，需要额外安装依赖。
+`media-scraping` 的标准日志生成、Markdown → 数据库迁移与数据库查询工具。脚本是 [`../scripts/scrape_log.py`](../scripts/scrape_log.py)，随 skill 安装，要求 Python 3.8+。`init` / `add` / `finish` / `validate` 只用 Python 标准库；`migrate` 与查询命令（`runs` / `items`）使用 [`../scripts/database/`](../scripts/database/) 的 SQLAlchemy Core 层，需要额外安装依赖。
 
 ## 用途
 
 - `init` / `add` / `finish`：按 [`scrape-log-template.md`](scrape-log-template.md) 生成日志，避免手写表头、转义和 `seq` 出错。
 - `validate`：校验单个文件或整个 `doc/`，迁移前可先跑一遍。
 - `migrate`：把 v1 Markdown 日志迁移到 SQLite / MySQL / PostgreSQL，生成 `data/migrations/<timestamp>-from-markdown.sql`，成功后归档 md。
+- `runs` / `items`：以统一 JSON 查询运行记录和操作记录，支持时间、状态、媒体类型过滤与分页。
 
-脚本只读写日志、目标数据库、`data/migrations/`、`doc/archive/`，以及 `--config` 指定的 `config.json`；不接触原始媒体文件，不联网。
+脚本只读写日志、目标数据库、`data/migrations/`、`doc/archive/`，以及 `--config` 指定的 `config.json`；不接触原始媒体文件，不联网。查询命令只对数据库执行 `SELECT`，不修改任何文件。
 
 ## 依赖
 
 `init` / `add` / `finish` / `validate` 只用标准库。
 
-`migrate` 需要 SQLAlchemy 2.x 和目标数据库驱动：
+`migrate` 与查询命令需要 SQLAlchemy 2.x 和目标数据库驱动：
 
 ```sh
 SKILL_DIR="$HOME/.claude/skills/media-scraping"   # 按实际安装位置调整
 python -m pip install -r "$SKILL_DIR/scripts/database/requirements.txt"
 ```
 
-`requirements.txt` 包含 SQLAlchemy、PyMySQL[rsa]（MySQL，含 MySQL 8 认证依赖）和 psycopg（PostgreSQL）；SQLite 使用 Python 标准库 `sqlite3`，无需额外驱动。未安装时 `migrate` 会报错并给出安装命令。
+`requirements.txt` 包含 SQLAlchemy、PyMySQL[rsa]（MySQL，含 MySQL 8 认证依赖）和 psycopg（PostgreSQL）；SQLite 使用 Python 标准库 `sqlite3`，无需额外驱动。未安装时 `migrate` 与查询命令会报错并给出安装命令。
 
-数据库层（仅 `migrate` 使用）：
+数据库层（`migrate` 与查询命令使用）：
 
 - `scripts/database/connection.py`：读取 `config.json`、解析连接信息、创建 engine。
 - `scripts/database/models.py`：SQLAlchemy Core 的 `scrape_runs` / `scrape_items` 表定义。
-- `scripts/database/repository.py`：统一数据访问接口；阶段一提供迁移所需的查询与写入。
+- `scripts/database/repository.py`：统一数据访问接口；提供迁移写入、`list_runs()` / `list_items()` / `get_run()` 查询与分页。
 - `scripts/database/migration.py`：Markdown 迁移编排、SQL 生成、事务导入与回滚。
 
 ## 脚本位置
@@ -195,7 +196,123 @@ PostgreSQL：
 
 `data/docs/` 等非 `doc/` 目录中的历史日志不在读取范围内；先按 16.4 归一化为 v1 模板并放入 `doc/`，再执行迁移。
 
+## 查询
+
+数据库模式下，`runs` / `items` 输出 JSON，适合脚本或后续刮削工具读取。查询只读：不建表、不修改数据库、日志或 `config.json`；数据库或表不存在时报错，SQLite 不会因查询自动创建文件。
+
+```sh
+# 最近 20 次运行
+python "$TOOL" runs --config config.json --limit 20
+
+# 错误状态的 TV 操作，按时间过滤；第二页（每页 50 条）
+python "$TOOL" items --config config.json \
+  --status error --media-type tv \
+  --since 2026-11-01 --until 2026-11-30 \
+  --limit 50 --offset 50
+
+# SQLite 默认 data/scraping-logs.db；其他路径用 --db
+python "$TOOL" items --db data/scraping-logs.db --run-id 20261126-153000
+```
+
+### 参数
+
+`runs`：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--run-id` | 无 | 精确匹配 `run_id` |
+| `--since` | 无 | `started_at` 下界，包含 |
+| `--until` | 无 | `started_at` 上界，包含 |
+| `--limit` | 50 | 每页行数，1–500 |
+| `--offset` | 0 | 跳过的行数 |
+| `--db` | `data/scraping-logs.db` | SQLite 路径；仅 SQLite；未提供时使用 `--config` 中的 `database.path` |
+| `--config` | 无 | 数据库配置；MySQL/PostgreSQL 必填 |
+
+`items`：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--run-id` | 无 | 精确匹配 `run_id` |
+| `--since` | 无 | `created_at` 下界，包含 |
+| `--until` | 无 | `created_at` 上界，包含 |
+| `--status` | 无 | 可重复；多个值按 OR |
+| `--media-type` | 无 | 可重复；多个值按 OR |
+| `--limit` | 50 | 每页行数，1–500 |
+| `--offset` | 0 | 跳过的行数 |
+| `--db` | `data/scraping-logs.db` | SQLite 路径；仅 SQLite；未提供时使用 `--config` 中的 `database.path` |
+| `--config` | 无 | 数据库配置；MySQL/PostgreSQL 必填 |
+
+- `--db` 与已配置的 `database.path` 不一致时报错；查询命令不修改 `config.json`。
+- 不同过滤条件之间按 AND，同一参数内多个值按 OR。
+- 时间格式为 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS`；只写日期时 `--since` 从 `00:00:00`、`--until` 到 `23:59:59`。时间按固定格式字符串比较，不做时区转换。
+- 结果按时间倒序：`runs` 按 `started_at` + `run_id` 排序，`items` 按 `created_at` + `id` 排序。
+
+### JSON 输出
+
+```json
+{
+  "schema": "media-scraping-query/v1",
+  "resource": "items",
+  "total": 1,
+  "limit": 50,
+  "offset": 0,
+  "count": 1,
+  "filters": {
+    "run_id": null,
+    "since": null,
+    "until": null,
+    "status": ["error"],
+    "media_type": []
+  },
+  "items": [
+    {
+      "id": 3,
+      "run_id": "20261120-100000",
+      "seq": 3,
+      "action": "error",
+      "media_type": "tv",
+      "source_path": "/src/C.mkv",
+      "target_path": null,
+      "status": "error",
+      "note": "failed",
+      "created_at": "2026-11-20 10:00:00"
+    }
+  ]
+}
+```
+
+- `total` 为过滤后的总行数，`count` 为本页行数；`limit` / `offset` 为本次请求值。
+- `filters` 为归一化后的过滤条件；`runs` 只有 `run_id` / `since` / `until`，`items` 另有 `status` / `media_type`。
+- `items` 的每行与数据库列同名；空值为 `null`。
+- 输出使用 UTF-8；运行时错误写入 stderr，退出码为 `1`；argparse 参数错误（如非法 `--status`）退出码为 `2`。
+
+### 可复用数据访问层
+
+`scripts/database/repository.py` 不依赖 CLI，后续刮削工具可以直接使用（在 `scripts/` 目录下运行，或把 `scripts/` 加入 `sys.path`）：
+
+```python
+from database import connection, repository
+
+engine, settings = connection.build_engine(config)  # config.json 的内容
+try:
+    with engine.connect() as conn:
+        page = repository.Repository(conn).list_items(
+            statuses=["error"],
+            media_types=["tv"],
+            since="2026-11-01 00:00:00",
+            until="2026-11-30 23:59:59",
+            limit=20,
+            offset=0,
+        )
+    print(page.total, page.items)
+finally:
+    engine.dispose()
+```
+
+`Repository.list_runs()` / `list_items()` 返回 `Page(total, items, limit, offset)`，`items` 为字典列表；`get_run(run_id)` 返回单条运行记录或 `None`。写入仍使用 `insert_run()` / `insert_items()`。
+
 ## 退出码
 
 - `0`：成功；`validate` 没有无效 v1 日志（legacy 跳过不算失败）
-- `1`：参数、校验或迁移错误
+- `1`：运行时错误，包括配置、校验、迁移和查询错误
+- `2`：argparse 参数用法错误（非法选项、非法枚举值、缺少必填参数等）

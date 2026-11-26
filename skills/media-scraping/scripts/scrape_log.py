@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Generate, validate, and migrate media-scraping Markdown logs.
+"""Generate, validate, migrate, and query media-scraping logs.
 
 Log generation and validation use only the Python standard library.  The
-``migrate`` command lazily imports ``scripts/database/`` and therefore
-requires SQLAlchemy plus the driver for the target database.
+``migrate`` and database query commands (``runs`` / ``items``) lazily
+import ``scripts/database/`` and therefore require SQLAlchemy plus the
+driver for the target database.
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 LOG_SCHEMA = "media-scraping-log/v1"
+QUERY_SCHEMA = "media-scraping-query/v1"
+DEFAULT_QUERY_LIMIT = 50
+MAX_QUERY_LIMIT = 500
 RUN_ID_RE = re.compile(r"^\d{8}-\d{6}$")
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 HEADER = ["seq", "action", "media_type", "status", "source_path", "target_path", "note"]
@@ -884,6 +888,187 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def parse_time_bound(value: str, *, end: bool) -> str:
+    """Normalize a query time bound to the stored timestamp format."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        value = value + (" 23:59:59" if end else " 00:00:00")
+    if not TIMESTAMP_RE.fullmatch(value):
+        raise ToolError(
+            "time must be YYYY-MM-DD or YYYY-MM-DD HH:MM:SS: %s" % value
+        )
+    try:
+        datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise ToolError("invalid time: %s" % value)
+    return value
+
+
+def _prepare_time_filters(
+    args: argparse.Namespace,
+) -> Tuple[Optional[str], Optional[str]]:
+    since = (
+        parse_time_bound(args.since, end=False)
+        if args.since is not None
+        else None
+    )
+    until = (
+        parse_time_bound(args.until, end=True)
+        if args.until is not None
+        else None
+    )
+    if since and until and since > until:
+        raise ToolError("--since must not be after --until")
+    return since, until
+
+
+def _validate_run_id_filter(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not RUN_ID_RE.fullmatch(value):
+        raise ToolError("--run-id must be YYYYMMDD-HHmmss")
+    return value
+
+
+def _validate_page_args(args: argparse.Namespace) -> None:
+    if not 1 <= args.limit <= MAX_QUERY_LIMIT:
+        raise ToolError(
+            "--limit must be between 1 and %d" % MAX_QUERY_LIMIT
+        )
+    if args.offset < 0:
+        raise ToolError("--offset must be >= 0")
+
+
+def _query_database_layer() -> Tuple[Any, Any, Tuple[Any, ...]]:
+    try:
+        from database import DatabaseError, connection, repository
+        from sqlalchemy.exc import SQLAlchemyError
+    except ImportError as exc:
+        requirements = (
+            Path(__file__).resolve().parent / "database" / "requirements.txt"
+        )
+        raise ToolError(
+            "database queries require SQLAlchemy and a database driver; "
+            "install with `python -m pip install -r %s` (%s)"
+            % (requirements, exc)
+        )
+    return connection, repository, (DatabaseError, SQLAlchemyError, OSError)
+
+
+def _open_query_database(
+    args: argparse.Namespace,
+) -> Tuple[Any, Any, Tuple[Any, ...]]:
+    connection, repository, db_errors = _query_database_layer()
+    config: Dict[str, Any] = load_config(args.config) if args.config else {}
+    try:
+        engine, settings = connection.build_engine(
+            config, db_override=args.db
+        )
+    except db_errors as exc:
+        raise ToolError(str(exc))
+
+    if settings.type == "sqlite" and (
+        settings.sqlite_path is None or not settings.sqlite_path.exists()
+    ):
+        engine.dispose()
+        raise ToolError(
+            "SQLite database not found: %s"
+            % (settings.sqlite_path or settings.raw.get("path"))
+        )
+    return engine, repository, db_errors
+
+
+def _print_json(payload: Dict[str, Any]) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError, ValueError):
+        pass
+    print(text)
+
+
+def _query_payload(
+    resource: str, page: Any, filters: Dict[str, Any]
+) -> Dict[str, Any]:
+    return {
+        "schema": QUERY_SCHEMA,
+        "resource": resource,
+        "total": page.total,
+        "limit": page.limit,
+        "offset": page.offset,
+        "count": len(page.items),
+        "filters": filters,
+        "items": page.items,
+    }
+
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    _validate_page_args(args)
+    run_id = _validate_run_id_filter(args.run_id)
+    since, until = _prepare_time_filters(args)
+    engine, repository, db_errors = _open_query_database(args)
+    try:
+        with engine.connect() as connection:
+            page = repository.Repository(connection).list_runs(
+                run_id=run_id,
+                since=since,
+                until=until,
+                limit=args.limit,
+                offset=args.offset,
+            )
+    except db_errors as exc:
+        raise ToolError(str(exc))
+    finally:
+        engine.dispose()
+
+    _print_json(
+        _query_payload(
+            "runs",
+            page,
+            {"run_id": run_id, "since": since, "until": until},
+        )
+    )
+    return 0
+
+
+def cmd_items(args: argparse.Namespace) -> int:
+    _validate_page_args(args)
+    run_id = _validate_run_id_filter(args.run_id)
+    since, until = _prepare_time_filters(args)
+    statuses = args.status or []
+    media_types = args.media_type or []
+    engine, repository, db_errors = _open_query_database(args)
+    try:
+        with engine.connect() as connection:
+            page = repository.Repository(connection).list_items(
+                run_id=run_id,
+                since=since,
+                until=until,
+                statuses=statuses,
+                media_types=media_types,
+                limit=args.limit,
+                offset=args.offset,
+            )
+    except db_errors as exc:
+        raise ToolError(str(exc))
+    finally:
+        engine.dispose()
+
+    _print_json(
+        _query_payload(
+            "items",
+            page,
+            {
+                "run_id": run_id,
+                "since": since,
+                "until": until,
+                "status": statuses,
+                "media_type": media_types,
+            },
+        )
+    )
+    return 0
+
+
 def non_negative_int(value: str) -> int:
     try:
         number = int(value)
@@ -894,10 +1079,22 @@ def non_negative_int(value: str) -> int:
     return number
 
 
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer")
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scrape_log.py",
-        description="Generate, validate, and migrate media-scraping Markdown logs.",
+        description=(
+            "Generate, validate, migrate, and query media-scraping logs."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -961,6 +1158,88 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_parser.add_argument("--dry-run", action="store_true")
     migrate_parser.add_argument("--no-archive", action="store_true")
     migrate_parser.set_defaults(func=cmd_migrate)
+
+    page_help = "page size (default: %d, max: %d)" % (
+        DEFAULT_QUERY_LIMIT,
+        MAX_QUERY_LIMIT,
+    )
+    runs_parser = subparsers.add_parser(
+        "runs",
+        help="list run records as JSON",
+        description=(
+            "List run records from the log database as JSON. "
+            "The query is read-only."
+        ),
+    )
+    runs_parser.add_argument("--run-id", help="exact run_id filter")
+    runs_parser.add_argument(
+        "--since", help="started_at lower bound, inclusive"
+    )
+    runs_parser.add_argument(
+        "--until", help="started_at upper bound, inclusive"
+    )
+    runs_parser.add_argument(
+        "--limit", type=positive_int, default=DEFAULT_QUERY_LIMIT, help=page_help
+    )
+    runs_parser.add_argument(
+        "--offset", type=non_negative_int, default=0, help="page offset (default: 0)"
+    )
+    runs_parser.add_argument(
+        "--db", help="SQLite database path (default: data/scraping-logs.db)"
+    )
+    runs_parser.add_argument(
+        "--config",
+        help=(
+            "read database settings from config.json; required for "
+            "MySQL/PostgreSQL"
+        ),
+    )
+    runs_parser.set_defaults(func=cmd_runs)
+
+    items_parser = subparsers.add_parser(
+        "items",
+        help="list operation records as JSON",
+        description=(
+            "List operation records from the log database as JSON. "
+            "Supports pagination and time/status/media-type filters."
+        ),
+    )
+    items_parser.add_argument("--run-id", help="exact run_id filter")
+    items_parser.add_argument(
+        "--since", help="created_at lower bound, inclusive"
+    )
+    items_parser.add_argument(
+        "--until", help="created_at upper bound, inclusive"
+    )
+    items_parser.add_argument(
+        "--status",
+        action="append",
+        choices=sorted(STATUSES),
+        help="repeatable status filter (OR)",
+    )
+    items_parser.add_argument(
+        "--media-type",
+        action="append",
+        choices=sorted(MEDIA_TYPES),
+        help="repeatable media type filter (OR)",
+    )
+    items_parser.add_argument(
+        "--limit", type=positive_int, default=DEFAULT_QUERY_LIMIT, help=page_help
+    )
+    items_parser.add_argument(
+        "--offset", type=non_negative_int, default=0, help="page offset (default: 0)"
+    )
+    items_parser.add_argument(
+        "--db", help="SQLite database path (default: data/scraping-logs.db)"
+    )
+    items_parser.add_argument(
+        "--config",
+        help=(
+            "read database settings from config.json; required for "
+            "MySQL/PostgreSQL"
+        ),
+    )
+    items_parser.set_defaults(func=cmd_items)
     return parser
 
 

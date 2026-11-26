@@ -5,9 +5,9 @@ description: 整理、重命名、入库媒体库文件时使用。统一 Movies
 
 # Media Scraping Specification
 
-Version: 1.10
+Version: 1.11
 
-> 变更记录：1.10（2026-11-26）数据库层改为 SQLAlchemy Core，`migrate` 支持 SQLite / MySQL / PostgreSQL；新增 `scripts/database/`（连接、表结构、仓储、迁移）与 `scripts/database/requirements.txt`，后者是本 skill 唯一的依赖例外，仅 `migrate` 需要；Markdown 日志格式与迁移兼容性不变。1.9（2026-11-26）日志脚本改为随 skill 安装的 `scripts/scrape_log.py`，直接执行，不再从 `references/scrape-log-tool.md` 提取；参考文档只保留用法。1.8（2026-11-26）新增 `references/scrape-log-tool.md`：`init` / `add` / `finish` / `validate` 按模板生成日志，`migrate` 将 v1 md 迁移到 SQLite（生成 SQL、事务导入、行数校验、归档、可选原子更新 `config.json`）；`finished_at` 运行中允许为 `null`，空 `note` 迁移为 `NULL`。1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
+> 变更记录：1.11（2026-11-26）新增数据库查询命令 `runs` / `items`：运行记录与操作记录分页查询，支持 `--run-id` / `--since` / `--until` / `--status` / `--media-type` 过滤，统一输出 `media-scraping-query/v1` JSON；`scripts/database/repository.py` 增加可复用查询接口；查询只读，不建表、不修改日志和 `config.json`。1.10（2026-11-26）数据库层改为 SQLAlchemy Core，`migrate` 支持 SQLite / MySQL / PostgreSQL；新增 `scripts/database/`（连接、表结构、仓储、迁移）与 `scripts/database/requirements.txt`，后者是本 skill 唯一的依赖例外，仅 `migrate` 需要；Markdown 日志格式与迁移兼容性不变。1.9（2026-11-26）日志脚本改为随 skill 安装的 `scripts/scrape_log.py`，直接执行，不再从 `references/scrape-log-tool.md` 提取；参考文档只保留用法。1.8（2026-11-26）新增 `references/scrape-log-tool.md`：`init` / `add` / `finish` / `validate` 按模板生成日志，`migrate` 将 v1 md 迁移到 SQLite（生成 SQL、事务导入、行数校验、归档、可选原子更新 `config.json`）；`finished_at` 运行中允许为 `null`，空 `note` 迁移为 `NULL`。1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
 
 ---
 
@@ -631,7 +631,7 @@ Anime/Fate Zero (2011)/Season 1/Fate.Zero.2011.S01E01.1080p.x265_FLAC-VCB-Studio
   - 用户未指定（回答“数据库”“随便”等）：默认 SQLite。
   - SQLite 为独立数据库文件，固定存放在 `data/scraping-logs.db`（`data/` 不存在时创建），配置写为 `{"type": "sqlite", "path": "data/scraping-logs.db"}`。
   - MySQL / PostgreSQL：询问 host、port、database、user；数据库本身必须已存在，脚本只建表、不建数据库。密码不得写入 `config.json`，只从 `password_env` 指定的环境变量读取（省略时使用 `MEDIA_SCRAPING_DB_PASSWORD`）；未设置时提示用户先设置该环境变量，不得把密码写入日志或 SQL。
-  - 数据库驱动由 `scripts/database/requirements.txt` 提供，仅 `migrate` 需要安装；Markdown 日志与 `init` / `add` / `finish` / `validate` 不依赖它。
+  - 数据库驱动由 `scripts/database/requirements.txt` 提供，仅 `migrate` 与查询命令（`runs` / `items`）需要安装；Markdown 日志与 `init` / `add` / `finish` / `validate` 不依赖它。
 - 询问完成后写入 `config.json`（第 23.2 节），本次及后续运行均按此配置记录日志。用户未回答时停止，不得开始刮削。
 - 用户显式要求修改存储方式时，按 16.4 迁移；未明确要求时不得切换。
 
@@ -660,7 +660,7 @@ doc/<run_id>.md
 
 - 脚本随 skill 安装；按 skill 加载时给出的 base directory 或安装位置直接执行，不要复制到工作区。
 - 运行开始执行 `init`，每个文件操作执行 `add`，结束执行 `finish`；迁移前用 `validate` 校验。
-- 脚本需要 Python 3.8+；`init` / `add` / `finish` / `validate` 仅用标准库，`migrate` 需要 SQLAlchemy 与目标数据库驱动（安装方式见 `references/scrape-log-tool.md`）。脚本缺失或 Python 不可用时按模板手写，并在结束前用 `validate` 校验（可在其他机器执行）。
+- 脚本需要 Python 3.8+；`init` / `add` / `finish` / `validate` 仅用标准库，`migrate` 与查询命令需要 SQLAlchemy 与目标数据库驱动（安装方式见 `references/scrape-log-tool.md`）。脚本缺失或 Python 不可用时按模板手写，并在结束前用 `validate` 校验（可在其他机器执行）。
 - `init` 不覆盖已有日志；`add` / `finish` 原子写入；`finish` 同步 frontmatter 与 `## Summary`。
 
 机器迁移只读取两部分：YAML frontmatter 与 `## Records` 表格。其余章节可自由书写，迁移时忽略。frontmatter 键名、Records 表头、列顺序和取值集合不得修改：
@@ -773,7 +773,7 @@ CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
 - 生成 SQL 前查询已有 `run_id` 并跳过重复项；提交前校验 `scrape_runs` / `scrape_items` 行数。
 - `--config` 提供时，在提交事务前原子更新 `config.json`；归档、config 写入或提交失败时回滚数据库记录、移回 md，并恢复原 config。
 - `--db` 只用于覆盖 SQLite 路径；MySQL / PostgreSQL 必须使用 `--config`。
-- `migrate` 需要 `scripts/database/requirements.txt` 中的 SQLAlchemy 与驱动，未安装时脚本报错并给出安装命令。`--dry-run` 对 SQLite 不创建数据库文件，对 MySQL / PostgreSQL 会只读连接查询已有 `run_id`。
+- `migrate`（以及 16.5 的查询命令）需要 `scripts/database/requirements.txt` 中的 SQLAlchemy 与驱动，未安装时脚本报错并给出安装命令。`--dry-run` 对 SQLite 不创建数据库文件，对 MySQL / PostgreSQL 会只读连接查询已有 `run_id`。
 
 仅迁移符合 `references/scrape-log-template.md` 的日志：解析后的 `log_schema` 必须为 `media-scraping-log/v1`，且 Records 表头与模板完全一致。旧格式日志不自动迁移，避免按标题猜测产生错误数据。
 
@@ -797,6 +797,26 @@ CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
 2. 校验记录数量一致。
 3. 成功后更新 `config.json` 的 `log_storage` 为 `markdown`；SQLite 数据库文件移动到 `data/archive/`，`config.json` 的 `database` 置为 `null`。非 SQLite 数据库保留原数据，仅断开配置。
 4. 失败时保留数据库与 `config.json` 不变，输出 `ERROR`。
+
+## 16.5 Database Queries
+
+数据库模式下，用 `scripts/scrape_log.py runs` / `items` 查询日志。查询命令只读：不建表、不写日志、不修改 `config.json`；数据库或表不存在时输出 `ERROR`（SQLite 不会因查询自动创建数据库文件）。
+
+- `runs`：运行记录，支持 `--run-id`、`--since`、`--until`、`--limit`、`--offset`；时间按 `started_at` 过滤。
+- `items`：操作记录，支持 `--run-id`、`--since`、`--until`、可重复的 `--status`、`--media-type`、`--limit`、`--offset`；时间按 `created_at` 过滤，同一过滤内多个值按 OR 处理。
+- 时间接受 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:MM:SS`，上下界均包含；日期形式的 `--since` 从 `00:00:00` 开始，`--until` 到 `23:59:59` 结束。时间按数据库中的固定格式字符串比较，不做本地时区转换。
+- 默认 `--limit 50`，最大 500；`--offset` 从 0 开始。结果按时间倒序：`runs` 按 `started_at`、`run_id` 排序，`items` 按 `created_at`、`id` 排序。
+- SQLite 默认 `data/scraping-logs.db`，可用 `--db` 覆盖；MySQL / PostgreSQL 必须用 `--config`。连接与密码规则同 16.4，密码仍只从环境变量读取。
+- 输出统一为 JSON 对象，`schema` 为 `media-scraping-query/v1`，包含 `resource`、`total`、`limit`、`offset`、`count`、`filters`、`items`；`total` 是过滤后的总行数，`count` 是本页行数。
+- 查询命令与 `migrate` 一样需要 `scripts/database/requirements.txt` 中的 SQLAlchemy 与驱动；`init` / `add` / `finish` / `validate` 仍只用标准库。
+- 可复用数据访问层：`scripts/database/repository.py` 的 `Repository.list_runs()` / `list_items()` / `get_run()` 可被后续刮削工具直接调用；CLI 的过滤参数最终传入这些方法，`since` / `until` 为完整时间字符串。
+
+示例：
+
+```sh
+python "$TOOL" runs --config config.json --limit 20
+python "$TOOL" items --config config.json --status error --since 2026-11-01 --until 2026-11-30 --limit 50
+```
 
 ---
 
