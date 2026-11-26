@@ -5,9 +5,9 @@ description: 整理、重命名、入库媒体库文件时使用。统一 Movies
 
 # Media Scraping Specification
 
-Version: 1.7
+Version: 1.9
 
-> 变更记录：1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
+> 变更记录：1.9（2026-11-26）日志脚本改为随 skill 安装的 `scripts/scrape_log.py`，直接执行，不再从 `references/scrape-log-tool.md` 提取；参考文档只保留用法。1.8（2026-11-26）新增 `references/scrape-log-tool.md`：`init` / `add` / `finish` / `validate` 按模板生成日志，`migrate` 将 v1 md 迁移到 SQLite（生成 SQL、事务导入、行数校验、归档、可选原子更新 `config.json`）；`finished_at` 运行中允许为 `null`，空 `note` 迁移为 `NULL`。1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
 
 ---
 
@@ -655,6 +655,13 @@ doc/<run_id>.md
 
 `doc/` 不存在时创建。`<run_id>` 为本次运行开始时间，格式 `YYYYMMDD-HHmmss`，例如 `20261126-153000`。
 
+日志优先由本 skill 的 `scripts/scrape_log.py` 生成（用法见 `references/scrape-log-tool.md`）：
+
+- 脚本随 skill 安装；按 skill 加载时给出的 base directory 或安装位置直接执行，不要复制到工作区。
+- 运行开始执行 `init`，每个文件操作执行 `add`，结束执行 `finish`；迁移前用 `validate` 校验。
+- 脚本需要 Python 3.8+，仅用标准库；脚本缺失或 Python 不可用时按模板手写，并在结束前用 `validate` 校验（可在其他机器执行）。
+- `init` 不覆盖已有日志；`add` / `finish` 原子写入；`finish` 同步 frontmatter 与 `## Summary`。
+
 机器迁移只读取两部分：YAML frontmatter 与 `## Records` 表格。其余章节可自由书写，迁移时忽略。frontmatter 键名、Records 表头、列顺序和取值集合不得修改：
 
 ```markdown
@@ -687,6 +694,7 @@ summary_errors: 0
 
 - frontmatter 为纯 `key: value`，不嵌套。字符串值统一用单引号包裹，值内的 `'` 写成 `''`；`library` 为 `null` 时不加引号，`summary_*` 为非负整数。
 - 必填键：`log_schema`、`run_id`、`started_at`、`finished_at`、`workspace`、`mode`、`library`、`summary_added`、`summary_skipped`、`summary_needs_review`、`summary_errors`。
+- `finished_at` 在运行中写 `null`，`finish` 后写 `YYYY-MM-DD HH:MM:SS`；md→数据库迁移只接受非 `null`。
 - 文件名 `<run_id>.md` 必须与 frontmatter 的 `run_id` 一致，且符合 `YYYYMMDD-HHmmss`；不一致时停止并输出 `Needs Manual Review`。
 - 模板结构发生不兼容变化时，必须把 `log_schema` 升为 `media-scraping-log/v2`，不得在 v1 下改字段或列。
 - `mode` 取值：`in_place`、`ingest`。`library` 在入库模式填媒体库绝对路径，否则为 `null`。
@@ -755,15 +763,22 @@ CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
 
 ### Markdown → 数据库
 
+优先使用本 skill 的 `scripts/scrape_log.py migrate` 子命令（用法见 `references/scrape-log-tool.md`）；它按本节规则执行 SQLite 迁移：
+
+- 默认读取 `doc/*.md`，写入 `data/scraping-logs.db`，SQL 保存到 `data/migrations/`，成功后归档到 `doc/archive/`。
+- 生成 SQL 前查询已有 `run_id` 并跳过重复项；提交前校验 `scrape_runs` / `scrape_items` 行数。
+- `--config` 提供时，在提交事务前原子更新 `config.json`；归档、config 写入或提交失败时回滚数据库、移回 md，并恢复原 config。
+- 脚本只支持 SQLite；其他数据库按下列步骤手工执行，或用生成的 SQL 作为参考改写方言。
+
 仅迁移符合 `references/scrape-log-template.md` 的日志：解析后的 `log_schema` 必须为 `media-scraping-log/v1`，且 Records 表头与模板完全一致。旧格式日志不自动迁移，避免按标题猜测产生错误数据。
 
 1. 读取 `doc/` 下所有 `.md`（不含 `doc/archive/`），逐个校验：
    - 缺少 frontmatter、`log_schema` 不为 `media-scraping-log/v1`、或 Records 表头不一致：判定为旧格式，跳过并在迁移报告中列出，不得删除。
-   - frontmatter 缺必填键、取值非法、文件名与 `run_id` 不一致、`seq` 不连续、列数不为 7、路径未用反引号包裹：该文件迁移失败，整次迁移停止并输出 `ERROR`，不得部分导入。
+   - frontmatter 缺必填键、取值非法、`finished_at` 为 `null`（运行未完成）、文件名与 `run_id` 不一致、`seq` 不连续、列数不为 7、路径未用反引号包裹：该文件迁移失败，整次迁移停止并输出 `ERROR`，不得部分导入。
    - 迁移前检查 `doc/archive/` 归档目标，已存在时停止，不覆盖。
-2. 解析结果：frontmatter → `scrape_runs`（`library` 写入 `library_path`）；Records 每行 → `scrape_items`。`seq`、`action`、`media_type`、`status`、`source_path`、`target_path`、`note` 原样写入，`created_at` 取该文件的 `started_at`；表格中的 `-` 转为 `NULL`。
+2. 解析结果：frontmatter → `scrape_runs`（`library` 写入 `library_path`）；Records 每行 → `scrape_items`。`seq`、`action`、`media_type`、`status`、`source_path`、`target_path`、`note` 原样写入，`created_at` 取该文件的 `started_at`；表格中的 `-` 转为 `NULL`，空 `note` 转为 `NULL`。
 3. 若目标数据库为 SQLite，创建 `data/scraping-logs.db` 并建表；其他数据库连接后建表。
-4. 生成完整 SQL（DDL + 全部 md 记录的 `INSERT`，字符串按目标方言转义；已存在的 `run_id` 使用目标方言的跳过语法）保存到 `data/migrations/<timestamp>-from-markdown.sql`，其中 `<timestamp>` 为迁移执行时间，格式 `YYYYMMDD-HHmmss`。
+4. 生成完整 SQL（DDL + 全部 md 记录的 `INSERT`，字符串按目标方言转义；已存在的 `run_id` 跳过，可用目标方言的跳过语法或在生成前排除）保存到 `data/migrations/<timestamp>-from-markdown.sql`，其中 `<timestamp>` 为迁移执行时间，格式 `YYYYMMDD-HHmmss`。
 5. 在事务中执行 SQL；`run_id` 已存在时跳过该次运行并报告，不得重复插入。
 6. 校验 `scrape_runs` / `scrape_items` 行数与解析结果一致。
 7. 成功后把已迁移的 md 文件移动到 `doc/archive/`，更新 `config.json` 的 `log_storage` 与 `database`。
