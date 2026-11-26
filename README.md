@@ -4,7 +4,7 @@
 ## Skills
 | Skill | 用途 | 版本 |
 |---|---|---|
-| [`media-scraping`](skills/media-scraping/SKILL.md) | 媒体库目录与文件重命名规范，硬链接入库，以 Jellyfin + TMDB 为准 | 1.5 |
+| [`media-scraping`](skills/media-scraping/SKILL.md) | 媒体库目录与文件重命名规范，硬链接入库 / 备份，刮削日志支持 Markdown（固定模板）或数据库（默认 SQLite），以 Jellyfin + TMDB 为准 | 1.7 |
 ## 安装
 把 skill 目录复制到 agent 扫描的位置即可，不需要重启。
 ```sh
@@ -52,6 +52,7 @@ Anime/
 - 只处理增量，已入库内容冻结（不重命名、不重建链接、不重新刮削）
 - 无法唯一确定时输出 `Needs Manual Review` 并停止，不猜测
 - 禁止复制、移动、删除原始文件；硬链接失败（含跨文件系统）即报错停止，不自动降级为 copy/move
+- Markdown 日志使用固定模板：[`references/scrape-log-template.md`](skills/media-scraping/references/scrape-log-template.md)，md→SQL 迁移只认该结构
 前置条件：`ffprobe` 可用；下载目录与媒体库位于同一文件系统（硬链接前提）；可访问 Jellyfin 与 TMDB。
 ## 开发约定
 仓库自身的维护约定见 [AGENTS.md](AGENTS.md)。

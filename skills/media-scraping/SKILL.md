@@ -5,9 +5,9 @@ description: 整理、重命名、入库媒体库文件时使用。统一 Movies
 
 # Media Scraping Specification
 
-Version: 1.5
+Version: 1.7
 
-> 规范内容以本文为准。修改规范时，同步更新上方的 `Version:` 与下方变更记录。
+> 变更记录：1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
 
 ---
 
@@ -115,6 +115,8 @@ Media/
 ```
 
 Agent 不允许创建新的媒体分类。
+
+入库模式下，该结构位于 `config.json` 的 `jellyfin_library` 根目录；不入库模式下，该结构位于工作区根目录（第 23 节）。
 
 ---
 
@@ -312,7 +314,7 @@ Interstellar.2014.2160p.x265_FLAC-SubsPlease.danmu.xml
 - 同一视频的 `.danmu.ass` 与 `.danmu.xml` 可同时存在；这是两种格式，不是重复文件。
 - 多个源文件映射到同一目标名（如同时有 `dm-chs` 和 `dm-cht`）时，不得覆盖：内容相同（或同一 inode）则保留一个，内容不同则停止并输出 `Needs Manual Review`，不得自行添加语言后缀。
 - 其他格式（如 `.json`）如确认是弹幕，也按 `<视频完整主名>.danmu.<ext>` 命名并保留扩展名；无法确认时输出 `Needs Manual Review`。
-- 无法唯一匹配视频的弹幕留在 backup 并记录，不得按集号猜测。
+- 无法唯一匹配视频的弹幕留在原处并记录（不入库模式同时保留在 `backup/<run_id>/`，入库模式保留在 `tmp/<run_id>/`），不得按集号猜测。
 - 弹幕文件与视频一样通过硬链接入库（第 21.1 节），不得复制、移动或删除原始文件。
 
 Jellyfin 说明：`.danmu.ass` 可能被 Jellyfin 的外挂字幕解析器当作字幕流（`danmu` 不是标准语言代码，通常会作为流标题），不影响视频匹配；`.danmu.xml` 不是 Jellyfin 原生字幕格式，需由支持弹幕的插件/客户端读取。两者都不要改名成普通字幕。
@@ -460,6 +462,10 @@ Jellyfin 以 `SxxExx` 识别剧集；`SxxExx` 之后的 `${resolution}.${videoCo
 
 每个媒体必须按以下步骤处理：
 
+Step 0
+
+读取工作区 `config.json`；首次运行按第 23.2 节完成设置。日志存储方式与入库模式以配置为准。
+
 Step 1
 
 识别媒体类型。
@@ -572,6 +578,12 @@ Needs Manual Review
 
 ✓ 文件数量一致
 
+✓ 本次运行日志已按模板写入 `doc/<run_id>.md` 或数据库
+
+✓ 不入库模式下 `backup/<run_id>/` 的备份硬链接已创建
+
+✓ 入库模式下 tmp 中的硬链接已移入媒体库，或剩余文件已记录
+
 若失败：
 
 停止处理。
@@ -593,10 +605,178 @@ Old:
 
 New:
 
-Fate Zero (2011)/Season 1/Fate.Zero.2011.S01E01.1080p.x265_FLAC-VCB-Studio.mkv
+Anime/Fate Zero (2011)/Season 1/Fate.Zero.2011.S01E01.1080p.x265_FLAC-VCB-Studio.mkv
 ```
 
-所有修改均需记录。
+所有修改均需记录，并写入持久化日志：Markdown 文档或数据库。
+
+日志存储方式由 `config.json` 的 `log_storage` 决定，首次运行时询问（16.1），之后不再重复询问。
+
+## 16.1 Log Storage Selection
+
+首次运行（`config.json` 不存在或缺少 `log_storage`）时，Agent 必须询问日志存储方式：
+
+```
+首次运行请选择日志存储方式：
+
+1. Markdown 文档：日志写入 doc/ 目录，每次运行一个 .md 文件
+2. 数据库：默认 SQLite，也可以使用其他数据库
+
+请选择 1 或 2。
+```
+
+- 选择 Markdown：`log_storage` 写为 `markdown`。
+- 选择数据库：继续询问数据库类型。
+  - 用户明确指出数据库类型时，使用该类型。
+  - 用户未指定（回答“数据库”“随便”等）：默认 SQLite。
+  - SQLite 为独立数据库文件，固定存放在 `data/scraping-logs.db`（`data/` 不存在时创建）。
+  - MySQL / PostgreSQL 等其他数据库：询问 host、port、database、user；密码不得写入 `config.json`，从环境变量 `MEDIA_SCRAPING_DB_PASSWORD` 读取，未设置时向用户询问，且不得写入日志。
+- 询问完成后写入 `config.json`（第 23.2 节），本次及后续运行均按此配置记录日志。用户未回答时停止，不得开始刮削。
+- 用户显式要求修改存储方式时，按 16.4 迁移；未明确要求时不得切换。
+
+兼容旧工作区：`config.json` 不存在或缺少 `log_storage`，但 `doc/` 下存在 `archive/` 之外的 `.md` 文件时，视为 Markdown 日志模式，补写 `config.json`（`log_storage: "markdown"`），不再询问日志存储方式；仅补问工作区与入库设置。若 `data/scraping-logs.db` 已存在，则视为 SQLite 日志模式，按同样方式补写配置。两者同时存在时停止，要求用户确认使用哪一种，不得自行选择。
+
+日志写入失败（磁盘满、权限不足、数据库连接失败等）时停止处理并输出：
+
+```
+ERROR:
+Failed to write scraping log.
+```
+
+不得在无日志的情况下继续刮削。
+
+## 16.2 Markdown Log Format
+
+Markdown 日志每次运行一个文件，必须严格使用 `references/scrape-log-template.md` 的结构：
+
+```
+doc/<run_id>.md
+```
+
+`doc/` 不存在时创建。`<run_id>` 为本次运行开始时间，格式 `YYYYMMDD-HHmmss`，例如 `20261126-153000`。
+
+机器迁移只读取两部分：YAML frontmatter 与 `## Records` 表格。其余章节可自由书写，迁移时忽略。frontmatter 键名、Records 表头、列顺序和取值集合不得修改：
+
+```markdown
+---
+log_schema: 'media-scraping-log/v1'
+run_id: '20261126-153000'
+started_at: '2026-11-26 15:30:00'
+finished_at: '2026-11-26 15:32:10'
+workspace: 'F:\MediaWork'
+mode: 'in_place'
+library: null
+summary_added: 1
+summary_skipped: 0
+summary_needs_review: 1
+summary_errors: 0
+---
+
+# Scrape Log: 20261126-153000
+
+## Records
+
+| seq | action | media_type | status | source_path | target_path | note |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | hardlink | tv | done | `D:\Downloads\Fate Zero\[VCB-Studio] Fate Zero [01][Ma10p_1080p][x265_flac].mkv` | `Anime/Fate Zero (2011)/Season 1/Fate.Zero.2011.S01E01.1080p.x265_FLAC-VCB-Studio.mkv` | |
+| 2 | backup | tv | done | `D:\Downloads\Fate Zero\[VCB-Studio] Fate Zero [01][Ma10p_1080p][x265_flac].mkv` | `backup/20261126-153000/Fate Zero/[VCB-Studio] Fate Zero [01][Ma10p_1080p][x265_flac].mkv` | |
+| 3 | review | tv | needs_review | `D:\Downloads\Fate Zero\[VCB-Studio] Fate Zero [SP].mkv` | `-` | 无对应 TMDB 剧集 |
+```
+
+规则：
+
+- frontmatter 为纯 `key: value`，不嵌套。字符串值统一用单引号包裹，值内的 `'` 写成 `''`；`library` 为 `null` 时不加引号，`summary_*` 为非负整数。
+- 必填键：`log_schema`、`run_id`、`started_at`、`finished_at`、`workspace`、`mode`、`library`、`summary_added`、`summary_skipped`、`summary_needs_review`、`summary_errors`。
+- 文件名 `<run_id>.md` 必须与 frontmatter 的 `run_id` 一致，且符合 `YYYYMMDD-HHmmss`；不一致时停止并输出 `Needs Manual Review`。
+- 模板结构发生不兼容变化时，必须把 `log_schema` 升为 `media-scraping-log/v2`，不得在 v1 下改字段或列。
+- `mode` 取值：`in_place`、`ingest`。`library` 在入库模式填媒体库绝对路径，否则为 `null`。
+- `workspace`、`mode`、`library` 必须与本次运行使用的 `config.json` 一致。
+- `summary_*` 与 `## Summary` 均按文件条目计数，不按操作条数计数；迁移以 frontmatter 为准，两者必须一致。
+- `seq` 为正整数，从 1 开始连续递增，不得重复。
+- `action` 取值：`rename`（原地重命名）、`hardlink`（创建硬链接）、`move`（tmp 中的硬链接移入媒体库）、`backup`（创建备份硬链接）、`skip`（未修改）、`review`（需人工确认）、`error`。
+- `media_type` 取值：`movie`、`tv`、`anime`、`anime_movie`、`special`、`subtitle`、`danmaku`、`artwork`、`metadata`、`music`、`other`；无法确定时用 `other`。
+- `status` 取值：`done`、`skipped`、`needs_review`、`error`。
+- `source_path` / `target_path` 必须用反引号包裹；没有对应路径时写 `-`。路径优先记录相对工作区根目录或媒体库根目录的路径；不在两者之内时记录绝对路径。
+- `note` 为单行纯文本，空值留空；单元格内的 `|` 写成 `\|`，换行写成空格。
+- 文件中只能出现一个 `## Records` 标题；解析时只认行首的 `## Records`（前后可有空行），忽略正文或引用块中的同名文本。`## Records` 标题之后必须紧跟表头，不得插入其他内容；表格之后可以追加 `## Summary`、`## Notes` 等人类可读章节，迁移在下一个行首 `## ` 标题处停止解析。
+- 需要人工确认或出错的条目同样写入 Records，不得只输出到终端。
+- 终端输出仍可使用本文开头的 `Rename: Old → New` 块；持久化日志必须使用上述固定结构。
+- 路径或备注无法满足表格语法（含反引号、换行等）时，停止并输出 `Needs Manual Review`，不得写出格式错误的日志。
+
+## 16.3 Database Log Format
+
+数据库模式下，每次运行写入一条 `scrape_runs`，每个文件操作写入一条 `scrape_items`。
+
+SQLite 表结构：
+
+```sql
+CREATE TABLE IF NOT EXISTS scrape_runs (
+    run_id                 TEXT PRIMARY KEY,
+    started_at             TEXT NOT NULL,
+    finished_at            TEXT,
+    workspace              TEXT NOT NULL,
+    mode                   TEXT NOT NULL,   -- in_place | ingest
+    library_path           TEXT,
+    summary_added          INTEGER NOT NULL DEFAULT 0,
+    summary_skipped        INTEGER NOT NULL DEFAULT 0,
+    summary_needs_review   INTEGER NOT NULL DEFAULT 0,
+    summary_errors         INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS scrape_items (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id       TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    action       TEXT NOT NULL,
+    media_type   TEXT,
+    source_path  TEXT,
+    target_path  TEXT,
+    status       TEXT NOT NULL,
+    note         TEXT,
+    created_at   TEXT NOT NULL,
+    UNIQUE (run_id, seq),
+    FOREIGN KEY (run_id) REFERENCES scrape_runs(run_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
+```
+
+- 非 SQLite 数据库按目标方言生成等价 DDL；字段含义不变。
+- `seq` 为本次运行内的记录序号，从 1 开始递增。
+- 写入使用事务；失败时回滚并输出 `ERROR`，不得只写入部分记录。
+- 正常运行时不得删除或重建已有表。
+- 迁移或手工执行用的 SQL 文件存放在 `data/migrations/`。
+
+## 16.4 Switching Log Storage
+
+仅当用户显式要求修改日志存储方式时执行，例如“日志改成数据库”“日志改回 md”。
+
+切换前输出迁移计划，等待用户确认。迁移失败时保持原存储方式不变，不得删除原始日志。
+
+### Markdown → 数据库
+
+仅迁移符合 `references/scrape-log-template.md` 的日志：解析后的 `log_schema` 必须为 `media-scraping-log/v1`，且 Records 表头与模板完全一致。旧格式日志不自动迁移，避免按标题猜测产生错误数据。
+
+1. 读取 `doc/` 下所有 `.md`（不含 `doc/archive/`），逐个校验：
+   - 缺少 frontmatter、`log_schema` 不为 `media-scraping-log/v1`、或 Records 表头不一致：判定为旧格式，跳过并在迁移报告中列出，不得删除。
+   - frontmatter 缺必填键、取值非法、文件名与 `run_id` 不一致、`seq` 不连续、列数不为 7、路径未用反引号包裹：该文件迁移失败，整次迁移停止并输出 `ERROR`，不得部分导入。
+   - 迁移前检查 `doc/archive/` 归档目标，已存在时停止，不覆盖。
+2. 解析结果：frontmatter → `scrape_runs`（`library` 写入 `library_path`）；Records 每行 → `scrape_items`。`seq`、`action`、`media_type`、`status`、`source_path`、`target_path`、`note` 原样写入，`created_at` 取该文件的 `started_at`；表格中的 `-` 转为 `NULL`。
+3. 若目标数据库为 SQLite，创建 `data/scraping-logs.db` 并建表；其他数据库连接后建表。
+4. 生成完整 SQL（DDL + 全部 md 记录的 `INSERT`，字符串按目标方言转义；已存在的 `run_id` 使用目标方言的跳过语法）保存到 `data/migrations/<timestamp>-from-markdown.sql`，其中 `<timestamp>` 为迁移执行时间，格式 `YYYYMMDD-HHmmss`。
+5. 在事务中执行 SQL；`run_id` 已存在时跳过该次运行并报告，不得重复插入。
+6. 校验 `scrape_runs` / `scrape_items` 行数与解析结果一致。
+7. 成功后把已迁移的 md 文件移动到 `doc/archive/`，更新 `config.json` 的 `log_storage` 与 `database`。
+8. 任一步失败：回滚数据库，保留全部 md 文件，不修改 `config.json`，输出 `ERROR`。
+
+旧格式日志（无 frontmatter 或 `log_schema` 不为 `media-scraping-log/v1`）不参与自动迁移。历史日志若位于 `data/docs/` 等非 `doc/` 目录，同样不在读取范围内；如需入库，先人工或单独脚本归一化为模板结构并放入 `doc/`，再执行上述流程。归一化结果需经用户确认，不得按标题、表头或文件名猜测迁移内容。
+
+### 数据库 → Markdown
+
+1. 读取数据库全部运行与记录，按 `run_id` 生成 `doc/<run_id>.md`（16.2 节模板，含 frontmatter 与 Records）。目标文件已存在时停止，不覆盖。
+2. 校验记录数量一致。
+3. 成功后更新 `config.json` 的 `log_storage` 为 `markdown`；SQLite 数据库文件移动到 `data/archive/`，`config.json` 的 `database` 置为 `null`。非 SQLite 数据库保留原数据，仅断开配置。
+4. 失败时保留数据库与 `config.json` 不变，输出 `ERROR`。
 
 ---
 
@@ -607,7 +787,10 @@ Agent 不允许：
 - 删除任何媒体
 - 删除任何字幕
 - 删除任何图片
+- 删除日志文件或日志数据库
 - 覆盖已有元数据
+- 覆盖已有 `config.json`
+- 未经用户要求切换日志存储方式
 - 修改视频内容
 - 转码视频
 
@@ -629,6 +812,8 @@ Agent 不允许：
 - 剧场版无法匹配
 - 弹幕无法匹配唯一视频
 - 多个弹幕映射到同一目标名且内容不同
+- 备份或入库目标已存在且 inode 不同
+- 日志迁移的归档目标已存在
 
 Agent 不允许自行决定。
 
@@ -706,6 +891,8 @@ Breaking Bad (2008)/
 - 创建字幕硬链接
 - 创建弹幕硬链接
 - 创建图片硬链接
+- 创建备份硬链接（第 23.4 节）
+- 将 `tmp/` 中的硬链接移动到媒体库（同一文件系统，第 23.3 节）
 
 禁止：
 
@@ -838,6 +1025,8 @@ Hard links are not supported.
 
 等待人工处理或调整目录结构。
 
+入库模式下，`tmp/` 与媒体库必须位于同一文件系统；否则同样停止并输出上述 `ERROR`，不得把移动硬链接降级为复制。
+
 ### 中文标题规则
 
 Agent 获取 TMDB 信息后，应按以下优先级确定目录名称：
@@ -931,4 +1120,178 @@ Needs Manual Review
 
 该操作不属于默认行为。
 
-修正存量时，可按第 5.1 节将既有散放影片移入/移出系列文件夹：只移动媒体库中的硬链接，原始文件与 backup 不动，并记录日志。
+修正存量时，可按第 5.1 节将既有散放影片移入/移出系列文件夹：只移动媒体库中的硬链接，原始文件与 `backup/` 不动，并记录日志。
+
+---
+
+# 23. Workspace & Ingestion
+
+## 23.1 Fixed Workspace
+
+本 skill 使用一个固定的刮削工作区。以下内容全部位于工作区根目录：
+
+```
+<workspace>/
+├── config.json
+├── doc/                  # Markdown 日志（固定模板，见 references/）
+├── data/                 # 数据库与迁移 SQL
+├── tmp/                  # 入库模式临时目录
+├── backup/               # 不入库模式的源文件备份硬链接
+├── Movies/
+├── Anime Movies/
+├── TV Shows/
+├── Anime/
+├── Documentaries/
+└── Music/
+```
+
+- 工作区路径记录在 `config.json` 的 `workspace` 字段，使用绝对路径。
+- 首次运行时由用户确认工作区路径，默认为 Agent 当前工作目录；确认后不得随意更换。
+- 当前目录没有 `config.json` 时，先询问工作区路径：用户指定已有工作区则读取其配置；用户确认以当前目录新建工作区时，才创建 `config.json` 并进入首次设置。不得在未确认的情况下新建工作区。
+- `doc/`、`data/`、`tmp/`、`backup/` 只存放日志、数据库和硬链接，不得混入其他文件。
+- 上述目录按需创建；目录不存在不代表配置错误。
+- 分类目录（`Movies/` 等）只在“不入库”模式或已有工作区中使用；入库模式的工作区可以没有分类目录。
+
+## 23.2 First-Run Setup
+
+首次运行指 `config.json` 不存在，或缺少 `log_storage` / `ingest` 等必要字段。
+
+首次运行以 `config.json` 是否存在为准；`doc/`、`data/` 只用于旧工作区的模式推断（16.1），数据库模式下 `doc/` 可以不存在。
+
+按以下顺序询问，只补问缺失项；全部确认后写入 `config.json`，之后不再重复询问：
+
+1. 工作区路径（默认当前目录）。若指定路径已存在 `config.json`，直接读取，不重复首次设置；目录不存在时先询问是否创建，不得擅自创建。
+2. 日志存储方式（16.1 节）。
+3. 是否需要入库：
+
+```
+本次刮削是否需要入库到 Jellyfin 媒体库？
+
+1. 需要：请提供媒体库根目录（例如 ~/media）
+2. 不需要：在工作区分类，并把源文件硬链接备份到 backup/
+```
+
+- 选择入库：必须提供 `jellyfin_library`；路径不存在时先询问是否创建，不得擅自创建。
+- 选择不入库：`jellyfin_library` 记为 `null`。
+
+`config.json` 示例（不入库 + Markdown 日志）：
+
+```json
+{
+  "schema_version": 1,
+  "workspace": "F:\\MediaWork",
+  "log_storage": "markdown",
+  "database": null,
+  "ingest": false,
+  "jellyfin_library": null
+}
+```
+
+入库 + SQLite 日志：
+
+```json
+{
+  "schema_version": 1,
+  "workspace": "F:\\MediaWork",
+  "log_storage": "database",
+  "database": {
+    "type": "sqlite",
+    "path": "data/scraping-logs.db"
+  },
+  "ingest": true,
+  "jellyfin_library": "~/media"
+}
+```
+
+非 SQLite 数据库：
+
+```json
+{
+  "schema_version": 1,
+  "workspace": "F:\\MediaWork",
+  "log_storage": "database",
+  "database": {
+    "type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "media_scraping",
+    "user": "scraper",
+    "password_env": "MEDIA_SCRAPING_DB_PASSWORD"
+  },
+  "ingest": true,
+  "jellyfin_library": "~/media"
+}
+```
+
+规则：
+
+- `jellyfin_library` 是媒体库根目录，其下直接使用第 4 节的分类结构。
+- `~` 在读取时展开为当前用户主目录。
+- `config.json` 已存在时不得覆盖；修改时保留未涉及字段。
+- `config.json` 无法解析时停止，要求用户修复或确认重建，不得静默覆盖。
+- `config.json` 写入失败时停止，不得在无配置的情况下开始刮削。
+- 用户只要求“本次入库”或“本次不入库”时，只对本次生效，不修改 `config.json`。
+- 用户明确要求修改默认设置时，更新对应字段并记录日志。
+
+## 23.3 Ingest Mode
+
+触发条件：`config.json` 中 `ingest: true`，或用户本次显式要求入库。
+
+前置条件：
+
+- `jellyfin_library` 已记录且可写。未记录时先询问媒体库路径；用户确认长期使用时写入 `config.json`，否则仅本次使用。
+- 源目录、`tmp/`、媒体库位于同一文件系统。
+
+流程：
+
+1. 创建 `tmp/<run_id>/`。目录已存在且非空时停止，不得复用或清空。
+2. 在 `tmp/<run_id>/` 下按第 4–12 节刮削：创建分类、季、电影目录，重命名并创建硬链接。所有文件均为硬链接，源文件不动。
+3. 按第 15、22 节校验。
+4. 合并到媒体库：
+   - 媒体库根目录缺少的分类目录，按第 4 节创建。
+   - 逐个把 `tmp/<run_id>/` 中的硬链接移动到媒体库对应路径。同一文件系统内移动不改变 inode。
+   - 目标已存在且与来源为同一 inode：跳过。
+   - 目标已存在但 inode 不同：不得覆盖，保留在 tmp，记为 `Needs Manual Review`。
+5. 清理：只删除 `tmp/<run_id>/` 下的空目录；仍有文件时保留并记录，不得删除。
+6. 日志记录源路径 → tmp 路径（`hardlink`）与 tmp 路径 → 媒体库路径（`move`）。
+7. 成功后，工作区中旧的分类目录不得删除或移动。
+
+禁止：
+
+- 复制
+- 跨文件系统移动
+- 覆盖已有文件
+- 删除 tmp 中未入库的文件
+
+`tmp/` 与媒体库不在同一文件系统时停止并输出：
+
+```
+ERROR:
+tmp and media library are on different filesystems.
+Hard links are required.
+```
+
+不得改为复制。
+
+## 23.4 Non-Ingest Mode
+
+触发条件：`config.json` 中 `ingest: false`，或用户本次显式要求不入库。
+
+流程：
+
+1. 备份源文件：把本次任务输入范围内的源文件（视频、字幕、弹幕、图片、NFO）按相对输入目录的路径，硬链接到 `backup/<run_id>/`。
+   - 目标已存在且为同一 inode：跳过。
+   - 目标已存在但 inode 不同：不得覆盖，记为 `Needs Manual Review`。
+   - 多个输入目录时，各自以其目录名在 `backup/<run_id>/` 下建子目录；子目录重名时停止并输出 `Needs Manual Review`。
+2. 在工作区根目录下按第 4–12 节分类、重命名并创建硬链接。
+3. 校验备份硬链接（第 21.2 节）。
+4. 日志记录备份硬链接（`backup`）与分类硬链接（`hardlink`）。
+5. 源文件保持原样，不得移动、复制或删除。
+
+源文件、工作区分类目录、`backup/` 不在同一文件系统时停止并输出第 21.3 节的 `ERROR`，不得降级为复制。
+
+## 23.5 Mode Change
+
+- 入库 / 不入库是默认设置，保存在 `config.json` 的 `ingest`。
+- 修改默认设置只影响后续运行；已经整理或入库的文件按第 22 节冻结，不自动搬运。
+- 需要修正存量时，按第 22.4 节处理。用户明确要求时，才可把工作区中已整理的硬链接移入媒体库，或反向移出；原始文件与 `backup/` 不动。
