@@ -1,10 +1,10 @@
 # agent-skills
 个人自用的 skills，仅按本人需求编写。
-以 Markdown 为主；脚本随 skill 放在 `scripts/`，只用 Python 标准库，无构建、无依赖、无 CI。每个 skill 一个目录，入口为 `SKILL.md`。
+以 Markdown 为主；脚本随 skill 放在 `scripts/`，除 `media-scraping/scripts/database/requirements.txt` 的数据库依赖外只用 Python 标准库，无构建、无 CI。每个 skill 一个目录，入口为 `SKILL.md`。
 ## Skills
 | Skill | 用途 | 版本 |
 |---|---|---|
-| [`media-scraping`](skills/media-scraping/SKILL.md) | 媒体库目录与文件重命名规范，硬链接入库 / 备份，刮削日志支持 Markdown（固定模板，`scripts/scrape_log.py` 生成）或数据库（默认 SQLite，md→SQLite 迁移脚本），以 Jellyfin + TMDB 为准 | 1.9 |
+| [`media-scraping`](skills/media-scraping/SKILL.md) | 媒体库目录与文件重命名规范，硬链接入库 / 备份，刮削日志支持 Markdown（固定模板，`scripts/scrape_log.py` 生成）或数据库（SQLite / MySQL / PostgreSQL，md→数据库迁移），以 Jellyfin + TMDB 为准 | 1.10 |
 ## 安装
 把 skill 目录复制到 agent 扫描的位置即可，不需要重启。
 ```sh
@@ -54,8 +54,9 @@ Anime/
 - 只处理增量，已入库内容冻结（不重命名、不重建链接、不重新刮削）
 - 无法唯一确定时输出 `Needs Manual Review` 并停止，不猜测
 - 禁止复制、移动、删除原始文件；硬链接失败（含跨文件系统）即报错停止，不自动降级为 copy/move
-- Markdown 日志使用固定模板：[`references/scrape-log-template.md`](skills/media-scraping/references/scrape-log-template.md)，md→SQL 迁移只认该结构
-- 日志生成与 md→SQLite 迁移脚本：[`scripts/scrape_log.py`](skills/media-scraping/scripts/scrape_log.py)（Python 3.8+，仅标准库；用法见 [`references/scrape-log-tool.md`](skills/media-scraping/references/scrape-log-tool.md)）
-前置条件：`ffprobe` 可用；下载目录与媒体库位于同一文件系统（硬链接前提）；可访问 Jellyfin 与 TMDB；日志脚本需要 Python 3.8+，随 skill 一起安装（不可用时按模板手写）。
+- Markdown 日志使用固定模板：[`references/scrape-log-template.md`](skills/media-scraping/references/scrape-log-template.md)，md→数据库迁移只认该结构
+- 日志生成与 md→数据库迁移脚本：[`scripts/scrape_log.py`](skills/media-scraping/scripts/scrape_log.py)（Python 3.8+；`init` / `add` / `finish` / `validate` 仅标准库，`migrate` 需要 SQLAlchemy 与数据库驱动；用法见 [`references/scrape-log-tool.md`](skills/media-scraping/references/scrape-log-tool.md)）
+- 数据库依赖（仅 `migrate`）：`python -m pip install -r skills/media-scraping/scripts/database/requirements.txt`（SQLAlchemy、PyMySQL[rsa]、psycopg）
+前置条件：`ffprobe` 可用；下载目录与媒体库位于同一文件系统（硬链接前提）；可访问 Jellyfin 与 TMDB；日志脚本需要 Python 3.8+，随 skill 一起安装（不可用时按模板手写）；数据库迁移需要上述依赖与可访问的数据库。
 ## 开发约定
 仓库自身的维护约定见 [AGENTS.md](AGENTS.md)。

@@ -5,9 +5,9 @@ description: 整理、重命名、入库媒体库文件时使用。统一 Movies
 
 # Media Scraping Specification
 
-Version: 1.9
+Version: 1.10
 
-> 变更记录：1.9（2026-11-26）日志脚本改为随 skill 安装的 `scripts/scrape_log.py`，直接执行，不再从 `references/scrape-log-tool.md` 提取；参考文档只保留用法。1.8（2026-11-26）新增 `references/scrape-log-tool.md`：`init` / `add` / `finish` / `validate` 按模板生成日志，`migrate` 将 v1 md 迁移到 SQLite（生成 SQL、事务导入、行数校验、归档、可选原子更新 `config.json`）；`finished_at` 运行中允许为 `null`，空 `note` 迁移为 `NULL`。1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
+> 变更记录：1.10（2026-11-26）数据库层改为 SQLAlchemy Core，`migrate` 支持 SQLite / MySQL / PostgreSQL；新增 `scripts/database/`（连接、表结构、仓储、迁移）与 `scripts/database/requirements.txt`，后者是本 skill 唯一的依赖例外，仅 `migrate` 需要；Markdown 日志格式与迁移兼容性不变。1.9（2026-11-26）日志脚本改为随 skill 安装的 `scripts/scrape_log.py`，直接执行，不再从 `references/scrape-log-tool.md` 提取；参考文档只保留用法。1.8（2026-11-26）新增 `references/scrape-log-tool.md`：`init` / `add` / `finish` / `validate` 按模板生成日志，`migrate` 将 v1 md 迁移到 SQLite（生成 SQL、事务导入、行数校验、归档、可选原子更新 `config.json`）；`finished_at` 运行中允许为 `null`，空 `note` 迁移为 `NULL`。1.7（2026-11-26）新增标准 Markdown 日志模板 `references/scrape-log-template.md`（YAML frontmatter + 固定 Records 表），md→SQL 只迁移符合模板的日志；旧格式日志不自动迁移，需先归一化。1.6（2026-11-26）新增固定工作区与首次运行设置（`config.json`）、刮削日志存储（Markdown / 数据库，默认 SQLite）、md 日志迁移为 SQL、入库与不入库两种流程（`tmp/` 中转、`backup/` 硬链接备份）。规范内容以本文为准，修改规范时同步更新此处。
 
 ---
 
@@ -629,8 +629,9 @@ Anime/Fate Zero (2011)/Season 1/Fate.Zero.2011.S01E01.1080p.x265_FLAC-VCB-Studio
 - 选择数据库：继续询问数据库类型。
   - 用户明确指出数据库类型时，使用该类型。
   - 用户未指定（回答“数据库”“随便”等）：默认 SQLite。
-  - SQLite 为独立数据库文件，固定存放在 `data/scraping-logs.db`（`data/` 不存在时创建）。
-  - MySQL / PostgreSQL 等其他数据库：询问 host、port、database、user；密码不得写入 `config.json`，从环境变量 `MEDIA_SCRAPING_DB_PASSWORD` 读取，未设置时向用户询问，且不得写入日志。
+  - SQLite 为独立数据库文件，固定存放在 `data/scraping-logs.db`（`data/` 不存在时创建），配置写为 `{"type": "sqlite", "path": "data/scraping-logs.db"}`。
+  - MySQL / PostgreSQL：询问 host、port、database、user；数据库本身必须已存在，脚本只建表、不建数据库。密码不得写入 `config.json`，只从 `password_env` 指定的环境变量读取（省略时使用 `MEDIA_SCRAPING_DB_PASSWORD`）；未设置时提示用户先设置该环境变量，不得把密码写入日志或 SQL。
+  - 数据库驱动由 `scripts/database/requirements.txt` 提供，仅 `migrate` 需要安装；Markdown 日志与 `init` / `add` / `finish` / `validate` 不依赖它。
 - 询问完成后写入 `config.json`（第 23.2 节），本次及后续运行均按此配置记录日志。用户未回答时停止，不得开始刮削。
 - 用户显式要求修改存储方式时，按 16.4 迁移；未明确要求时不得切换。
 
@@ -659,7 +660,7 @@ doc/<run_id>.md
 
 - 脚本随 skill 安装；按 skill 加载时给出的 base directory 或安装位置直接执行，不要复制到工作区。
 - 运行开始执行 `init`，每个文件操作执行 `add`，结束执行 `finish`；迁移前用 `validate` 校验。
-- 脚本需要 Python 3.8+，仅用标准库；脚本缺失或 Python 不可用时按模板手写，并在结束前用 `validate` 校验（可在其他机器执行）。
+- 脚本需要 Python 3.8+；`init` / `add` / `finish` / `validate` 仅用标准库，`migrate` 需要 SQLAlchemy 与目标数据库驱动（安装方式见 `references/scrape-log-tool.md`）。脚本缺失或 Python 不可用时按模板手写，并在结束前用 `validate` 校验（可在其他机器执行）。
 - `init` 不覆盖已有日志；`add` / `finish` 原子写入；`finish` 同步 frontmatter 与 `## Summary`。
 
 机器迁移只读取两部分：YAML frontmatter 与 `## Records` 表格。其余章节可自由书写，迁移时忽略。frontmatter 键名、Records 表头、列顺序和取值集合不得修改：
@@ -713,7 +714,7 @@ summary_errors: 0
 
 ## 16.3 Database Log Format
 
-数据库模式下，每次运行写入一条 `scrape_runs`，每个文件操作写入一条 `scrape_items`。
+数据库模式下，每次运行写入一条 `scrape_runs`，每个文件操作写入一条 `scrape_items`。表结构由 `scripts/database/models.py` 用 SQLAlchemy Core 定义，SQLite / MySQL / PostgreSQL 共用同一份列、约束与索引。
 
 SQLite 表结构：
 
@@ -749,9 +750,11 @@ CREATE TABLE IF NOT EXISTS scrape_items (
 CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
 ```
 
-- 非 SQLite 数据库按目标方言生成等价 DDL；字段含义不变。
+- 非 SQLite 数据库按目标方言生成等价 DDL；字段含义不变。类型映射：SQLite 沿用上表的 `TEXT`；MySQL / PostgreSQL 的 `run_id`、`started_at`、`finished_at`、`mode`、`action`、`media_type`、`status` 使用 `VARCHAR`（短键 64、时间 19），路径、备注与工作区使用 `TEXT`。
+- MySQL 使用 InnoDB / `utf8mb4`；MySQL 不支持 `CREATE INDEX IF NOT EXISTS`，迁移 SQL 中的索引按普通 `CREATE INDEX` 生成。
+- 建表使用 `CREATE TABLE IF NOT EXISTS` 语义，只创建缺失的表及其索引，不重建或修改已有表。
 - `seq` 为本次运行内的记录序号，从 1 开始递增。
-- 写入使用事务；失败时回滚并输出 `ERROR`，不得只写入部分记录。
+- 写入使用事务；失败时回滚记录并输出 `ERROR`，不得只写入部分记录。建表在导入事务之前执行，失败时表可能保留（MySQL DDL 自动提交，SQLite / PostgreSQL 也不保证回滚 DDL），但不会留下部分记录。
 - 正常运行时不得删除或重建已有表。
 - 迁移或手工执行用的 SQL 文件存放在 `data/migrations/`。
 
@@ -763,12 +766,14 @@ CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
 
 ### Markdown → 数据库
 
-优先使用本 skill 的 `scripts/scrape_log.py migrate` 子命令（用法见 `references/scrape-log-tool.md`）；它按本节规则执行 SQLite 迁移：
+优先使用本 skill 的 `scripts/scrape_log.py migrate` 子命令（用法见 `references/scrape-log-tool.md`）；它按本节规则支持 SQLite / MySQL / PostgreSQL：
 
-- 默认读取 `doc/*.md`，写入 `data/scraping-logs.db`，SQL 保存到 `data/migrations/`，成功后归档到 `doc/archive/`。
+- 默认读取 `doc/*.md`；未配置数据库时写入 SQLite `data/scraping-logs.db`，SQL 保存到 `data/migrations/`，成功后归档到 `doc/archive/`。MySQL / PostgreSQL 必须通过 `--config` 提供连接信息，数据库需已存在。
+- SQL 按目标方言生成（SQLite 保持 `TEXT`；MySQL / PostgreSQL 使用 `VARCHAR` / `TEXT`）；实际导入使用参数化插入。
 - 生成 SQL 前查询已有 `run_id` 并跳过重复项；提交前校验 `scrape_runs` / `scrape_items` 行数。
-- `--config` 提供时，在提交事务前原子更新 `config.json`；归档、config 写入或提交失败时回滚数据库、移回 md，并恢复原 config。
-- 脚本只支持 SQLite；其他数据库按下列步骤手工执行，或用生成的 SQL 作为参考改写方言。
+- `--config` 提供时，在提交事务前原子更新 `config.json`；归档、config 写入或提交失败时回滚数据库记录、移回 md，并恢复原 config。
+- `--db` 只用于覆盖 SQLite 路径；MySQL / PostgreSQL 必须使用 `--config`。
+- `migrate` 需要 `scripts/database/requirements.txt` 中的 SQLAlchemy 与驱动，未安装时脚本报错并给出安装命令。`--dry-run` 对 SQLite 不创建数据库文件，对 MySQL / PostgreSQL 会只读连接查询已有 `run_id`。
 
 仅迁移符合 `references/scrape-log-template.md` 的日志：解析后的 `log_schema` 必须为 `media-scraping-log/v1`，且 Records 表头与模板完全一致。旧格式日志不自动迁移，避免按标题猜测产生错误数据。
 
@@ -777,12 +782,12 @@ CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);
    - frontmatter 缺必填键、取值非法、`finished_at` 为 `null`（运行未完成）、文件名与 `run_id` 不一致、`seq` 不连续、列数不为 7、路径未用反引号包裹：该文件迁移失败，整次迁移停止并输出 `ERROR`，不得部分导入。
    - 迁移前检查 `doc/archive/` 归档目标，已存在时停止，不覆盖。
 2. 解析结果：frontmatter → `scrape_runs`（`library` 写入 `library_path`）；Records 每行 → `scrape_items`。`seq`、`action`、`media_type`、`status`、`source_path`、`target_path`、`note` 原样写入，`created_at` 取该文件的 `started_at`；表格中的 `-` 转为 `NULL`，空 `note` 转为 `NULL`。
-3. 若目标数据库为 SQLite，创建 `data/scraping-logs.db` 并建表；其他数据库连接后建表。
+3. 若目标数据库为 SQLite，创建 `data/scraping-logs.db` 并建表；MySQL / PostgreSQL 连接已存在的数据库后建表，不创建数据库。
 4. 生成完整 SQL（DDL + 全部 md 记录的 `INSERT`，字符串按目标方言转义；已存在的 `run_id` 跳过，可用目标方言的跳过语法或在生成前排除）保存到 `data/migrations/<timestamp>-from-markdown.sql`，其中 `<timestamp>` 为迁移执行时间，格式 `YYYYMMDD-HHmmss`。
-5. 在事务中执行 SQL；`run_id` 已存在时跳过该次运行并报告，不得重复插入。
+5. 在事务中执行 SQL，或使用等价的参数化插入；`run_id` 已存在时跳过该次运行并报告，不得重复插入。
 6. 校验 `scrape_runs` / `scrape_items` 行数与解析结果一致。
 7. 成功后把已迁移的 md 文件移动到 `doc/archive/`，更新 `config.json` 的 `log_storage` 与 `database`。
-8. 任一步失败：回滚数据库，保留全部 md 文件，不修改 `config.json`，输出 `ERROR`。
+8. 任一步失败：回滚数据库记录，保留全部 md 文件，不修改 `config.json`，输出 `ERROR`。建表在导入事务之前执行，失败时表可能保留，但不会留下部分记录。
 
 旧格式日志（无 frontmatter 或 `log_schema` 不为 `media-scraping-log/v1`）不参与自动迁移。历史日志若位于 `data/docs/` 等非 `doc/` 目录，同样不在读取范围内；如需入库，先人工或单独脚本归一化为模板结构并放入 `doc/`，再执行上述流程。归一化结果需经用户确认，不得按标题、表头或文件名猜测迁移内容。
 
@@ -1238,8 +1243,30 @@ Needs Manual Review
 }
 ```
 
+PostgreSQL 把 `type` 改为 `postgresql`，端口默认 5432，其余字段相同：
+
+```json
+{
+  "schema_version": 1,
+  "workspace": "F:\\MediaWork",
+  "log_storage": "database",
+  "database": {
+    "type": "postgresql",
+    "host": "127.0.0.1",
+    "port": 5432,
+    "database": "media_scraping",
+    "user": "scraper",
+    "password_env": "MEDIA_SCRAPING_DB_PASSWORD"
+  },
+  "ingest": true,
+  "jellyfin_library": "~/media"
+}
+```
+
 规则：
 
+- `database` 的 `type` 支持 `sqlite` / `mysql` / `postgresql`；数据库名可写作 `database` 或 `name`（同时存在时以 `database` 为准）。
+- 密码只从 `password_env` 指定的环境变量读取，默认 `MEDIA_SCRAPING_DB_PASSWORD`；不得把密码写入 `config.json`、日志或 SQL。MySQL / PostgreSQL 数据库本身必须已存在。
 - `jellyfin_library` 是媒体库根目录，其下直接使用第 4 节的分类结构。
 - `~` 在读取时展开为当前用户主目录。
 - `config.json` 已存在时不得覆盖；修改时保留未涉及字段。

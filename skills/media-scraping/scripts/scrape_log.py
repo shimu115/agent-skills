@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Generate, validate, and migrate media-scraping Markdown logs.
 
-Standard library only. Requires Python 3.8+.
+Log generation and validation use only the Python standard library.  The
+``migrate`` command lazily imports ``scripts/database/`` and therefore
+requires SQLAlchemy plus the driver for the target database.
 """
 
 from __future__ import annotations
@@ -10,8 +12,6 @@ import argparse
 import json
 import os
 import re
-import shutil
-import sqlite3
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -42,39 +42,6 @@ SUMMARY_LABELS = {
     "summary_needs_review": "Needs Manual Review",
     "summary_errors": "Errors",
 }
-
-CREATE_RUNS = """CREATE TABLE IF NOT EXISTS scrape_runs (
-    run_id                 TEXT PRIMARY KEY,
-    started_at             TEXT NOT NULL,
-    finished_at            TEXT,
-    workspace              TEXT NOT NULL,
-    mode                   TEXT NOT NULL,
-    library_path           TEXT,
-    summary_added          INTEGER NOT NULL DEFAULT 0,
-    summary_skipped        INTEGER NOT NULL DEFAULT 0,
-    summary_needs_review   INTEGER NOT NULL DEFAULT 0,
-    summary_errors         INTEGER NOT NULL DEFAULT 0
-);"""
-
-CREATE_ITEMS = """CREATE TABLE IF NOT EXISTS scrape_items (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id       TEXT NOT NULL,
-    seq          INTEGER NOT NULL,
-    action       TEXT NOT NULL,
-    media_type   TEXT,
-    source_path  TEXT,
-    target_path  TEXT,
-    status       TEXT NOT NULL,
-    note         TEXT,
-    created_at   TEXT NOT NULL,
-    UNIQUE (run_id, seq),
-    FOREIGN KEY (run_id) REFERENCES scrape_runs(run_id)
-);"""
-
-CREATE_INDEX = """CREATE INDEX IF NOT EXISTS idx_scrape_items_run_id ON scrape_items(run_id);"""
-
-DDL = "\n\n".join([CREATE_RUNS, CREATE_ITEMS, CREATE_INDEX])
-
 
 class ToolError(Exception):
     pass
@@ -774,140 +741,41 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def existing_run_ids(conn: sqlite3.Connection) -> set:
-    try:
-        rows = conn.execute("SELECT run_id FROM scrape_runs").fetchall()
-        return {row[0] for row in rows}
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc).lower():
-            return set()
-        raise
-
-
-def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(CREATE_RUNS)
-    conn.execute(CREATE_ITEMS)
-    conn.execute(CREATE_INDEX)
-
-
-def insert_doc(conn: sqlite3.Connection, doc: LogDoc) -> None:
+def _migration_doc(doc: LogDoc, migration_doc_cls: Any) -> Any:
     fm = doc.frontmatter
-    conn.execute(
-        """INSERT INTO scrape_runs (
-            run_id, started_at, finished_at, workspace, mode, library_path,
-            summary_added, summary_skipped, summary_needs_review, summary_errors
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            fm["run_id"], fm["started_at"], fm["finished_at"], fm["workspace"],
-            fm["mode"], fm["library"], fm["summary_added"], fm["summary_skipped"],
-            fm["summary_needs_review"], fm["summary_errors"],
-        ),
+    return migration_doc_cls(
+        path=doc.path,
+        run={
+            "run_id": fm["run_id"],
+            "started_at": fm["started_at"],
+            "finished_at": fm["finished_at"],
+            "workspace": fm["workspace"],
+            "mode": fm["mode"],
+            "library_path": fm["library"],
+            "summary_added": fm["summary_added"],
+            "summary_skipped": fm["summary_skipped"],
+            "summary_needs_review": fm["summary_needs_review"],
+            "summary_errors": fm["summary_errors"],
+        },
+        items=[
+            {
+                "run_id": fm["run_id"],
+                "seq": record.seq,
+                "action": record.action,
+                "media_type": record.media_type,
+                "source_path": record.source_path,
+                "target_path": record.target_path,
+                "status": record.status,
+                "note": record.note or None,
+                "created_at": fm["started_at"],
+            }
+            for record in doc.records
+        ],
     )
-    for record in doc.records:
-        conn.execute(
-            """INSERT INTO scrape_items (
-                run_id, seq, action, media_type, source_path, target_path,
-                status, note, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                fm["run_id"], record.seq, record.action, record.media_type,
-                record.source_path, record.target_path, record.status,
-                record.note or None, fm["started_at"],
-            ),
-        )
-
-
-def sql_quote(value: Any) -> str:
-    if value is None:
-        return "NULL"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def build_sql(docs: List[LogDoc], generated_at: str) -> str:
-    lines = [
-        "-- media-scraping md -> SQLite migration",
-        "-- generated_at: %s" % generated_at,
-        "-- source logs:",
-    ]
-    for doc in docs:
-        safe_name = doc.path.name.replace("\r", " ").replace("\n", " ")
-        lines.append("--   %s (run_id=%s)" % (safe_name, doc.frontmatter["run_id"]))
-    lines.extend(["", "BEGIN;", "", DDL, ""])
-    for doc in docs:
-        fm = doc.frontmatter
-        run_values = [
-            fm["run_id"], fm["started_at"], fm["finished_at"], fm["workspace"],
-            fm["mode"], fm["library"], fm["summary_added"], fm["summary_skipped"],
-            fm["summary_needs_review"], fm["summary_errors"],
-        ]
-        lines.append(
-            "INSERT INTO scrape_runs (run_id, started_at, finished_at, workspace, "
-            "mode, library_path, summary_added, summary_skipped, "
-            "summary_needs_review, summary_errors) VALUES (%s);"
-            % ", ".join(sql_quote(value) for value in run_values)
-        )
-        for record in doc.records:
-            item_values = [
-                fm["run_id"], record.seq, record.action, record.media_type,
-                record.source_path, record.target_path, record.status,
-                record.note or None, fm["started_at"],
-            ]
-            lines.append(
-                "INSERT INTO scrape_items (run_id, seq, action, media_type, "
-                "source_path, target_path, status, note, created_at) VALUES (%s);"
-                % ", ".join(sql_quote(value) for value in item_values)
-            )
-        lines.append("")
-    lines.append("COMMIT;")
-    return "\n".join(lines) + "\n"
-
-
-def config_db_path(config: Dict[str, Any], raw_path: str) -> Path:
-    candidate = Path(os.path.expanduser(raw_path))
-    if candidate.is_absolute():
-        return candidate
-    workspace = config.get("workspace")
-    if isinstance(workspace, str) and workspace:
-        base = Path(os.path.expanduser(workspace))
-        return base / candidate
-    return candidate
-
-
-def relative_db_path(db_path: Path, config: Dict[str, Any]) -> str:
-    workspace = config.get("workspace")
-    base = None
-    if isinstance(workspace, str) and workspace:
-        base = Path(os.path.abspath(os.path.expanduser(workspace)))
-    if base is not None:
-        try:
-            rel = os.path.relpath(str(db_path.resolve()), str(base))
-            if not rel.startswith(".."):
-                return rel.replace("\\", "/")
-        except ValueError:
-            pass
-    return str(db_path.resolve()).replace("\\", "/")
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
     config: Dict[str, Any] = load_config(args.config) if args.config else {}
-    config_db = None
-    if config:
-        database = config.get("database")
-        if isinstance(database, dict):
-            db_type = database.get("type")
-            if db_type not in (None, "sqlite"):
-                raise ToolError(
-                    "migrate only supports SQLite; config.json database.type is %r"
-                    % db_type
-                )
-            if database.get("path"):
-                config_db = config_db_path(config, str(database["path"]))
-    if args.db and config_db is not None:
-        if Path(args.db).resolve() != config_db.resolve():
-            raise ToolError("--db does not match config.json database.path")
-    db_path = Path(args.db) if args.db else (config_db or Path("data/scraping-logs.db"))
 
     doc_dir = Path(args.doc_dir)
     if not doc_dir.is_dir():
@@ -931,165 +799,87 @@ def cmd_migrate(args: argparse.Namespace) -> int:
             for error in errors:
                 print("    - %s" % error, file=sys.stderr)
         return 1
-    seen_run_ids: Dict[str, Path] = {}
-    for doc in valid:
-        run_id = doc.frontmatter["run_id"]
-        if run_id in seen_run_ids:
-            raise ToolError(
-                "duplicate run_id %s in %s and %s"
-                % (run_id, seen_run_ids[run_id], doc.path)
-            )
-        seen_run_ids[run_id] = doc.path
-
-    existing = set()
-    if db_path.exists():
-        try:
-            conn = sqlite3.connect(str(db_path))
-            try:
-                existing = existing_run_ids(conn)
-            finally:
-                conn.close()
-        except sqlite3.Error as exc:
-            raise ToolError("cannot read database %s: %s" % (db_path, exc))
-    new_docs = [
-        doc for doc in valid if doc.frontmatter["run_id"] not in existing
-    ]
-    duplicates = [
-        doc for doc in valid if doc.frontmatter["run_id"] in existing
-    ]
-
-    archive_dir = doc_dir / "archive"
-    if not args.no_archive:
-        for doc in new_docs:
-            target = archive_dir / doc.path.name
-            if target.exists():
-                raise ToolError("archive target already exists: %s" % target)
 
     print("Found: %d md file(s)" % len(logs))
     print("  valid: %d" % len(valid))
     print("  legacy (skipped): %d" % len(legacy))
-    print("  duplicate run_id (skipped): %d" % len(duplicates))
 
-    if not new_docs:
+    try:
+        from database import DatabaseError, connection, migration
+        from sqlalchemy.exc import SQLAlchemyError
+    except ImportError as exc:
+        requirements = (
+            Path(__file__).resolve().parent / "database" / "requirements.txt"
+        )
+        raise ToolError(
+            "migrate requires SQLAlchemy and a database driver; install with "
+            "`python -m pip install -r %s` (%s)" % (requirements, exc)
+        )
+
+    engine = None
+    try:
+        engine, settings = connection.build_engine(config, db_override=args.db)
+        docs = [_migration_doc(doc, migration.MigrationDoc) for doc in valid]
+        result = migration.migrate(
+            docs,
+            engine,
+            settings,
+            migrations_dir=(
+                Path(args.migrations_dir)
+                if args.migrations_dir
+                else doc_dir.parent / "data" / "migrations"
+            ),
+            archive_dir=doc_dir / "archive",
+            config_path=Path(args.config) if args.config else None,
+            config=config,
+            dry_run=args.dry_run,
+            no_archive=args.no_archive,
+        )
+    except (DatabaseError, SQLAlchemyError, OSError) as exc:
+        raise ToolError(str(exc))
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+    print("  duplicate run_id (skipped): %d" % len(result.skipped))
+
+    if result.sql_path is None:
         print("Nothing to migrate.")
         for path, reason in legacy:
             print("  legacy: %s: %s" % (path, reason))
-        for doc in duplicates:
-            print(
-                "  duplicate: %s (run_id=%s)"
-                % (doc.path, doc.frontmatter["run_id"])
-            )
+        for doc in result.skipped:
+            print("  duplicate: %s (run_id=%s)" % (doc.path, doc.run_id))
         return 0
 
-    migrations_dir = (
-        Path(args.migrations_dir)
-        if args.migrations_dir
-        else doc_dir.parent / "data" / "migrations"
-    )
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    sql_path = migrations_dir / ("%s-from-markdown.sql" % timestamp)
-    suffix = 2
-    while sql_path.exists():
-        sql_path = migrations_dir / ("%s-%d-from-markdown.sql" % (timestamp, suffix))
-        suffix += 1
-    sql_text = build_sql(new_docs, timestamp)
-    write_text_atomic(sql_path, sql_text)
-    print("SQL: %s" % sql_path)
-    if args.dry_run:
+    print("SQL: %s" % result.sql_path)
+    if result.dry_run:
         print("Dry run: SQL generated, database and logs unchanged.")
         return 0
 
-    config_path = Path(args.config) if args.config else None
-    config_old_text = None
-    config_new_text = None
-    if config_path is not None:
-        try:
-            config_old_text = config_path.read_text(encoding="utf-8-sig")
-        except OSError as exc:
-            raise ToolError("cannot read config %s: %s" % (config_path, exc))
-        new_config = dict(config)
-        new_config["log_storage"] = "database"
-        new_config["database"] = {
-            "type": "sqlite",
-            "path": relative_db_path(db_path, config),
-        }
-        config_new_text = json.dumps(new_config, ensure_ascii=False, indent=2) + "\n"
-
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    moved: List[Tuple[Path, Path]] = []
-    config_written = False
-    try:
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("BEGIN")
-        ensure_schema(conn)
-        for doc in new_docs:
-            insert_doc(conn, doc)
-        for doc in new_docs:
-            run_id = doc.frontmatter["run_id"]
-            run_count = conn.execute(
-                "SELECT COUNT(*) FROM scrape_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()[0]
-            item_count = conn.execute(
-                "SELECT COUNT(*) FROM scrape_items WHERE run_id = ?", (run_id,)
-            ).fetchone()[0]
-            if run_count != 1 or item_count != len(doc.records):
-                raise ToolError(
-                    "verification failed for %s: runs=%d, items=%d"
-                    % (run_id, run_count, item_count)
-                )
-        if not args.no_archive:
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            for doc in new_docs:
-                target = archive_dir / doc.path.name
-                if target.exists():
-                    raise ToolError("archive target already exists: %s" % target)
-                shutil.move(str(doc.path), str(target))
-                moved.append((doc.path, target))
-        if config_path is not None and config_new_text is not None:
-            write_text_atomic(config_path, config_new_text)
-            config_written = True
-        conn.commit()
-    except BaseException:
-        try:
-            conn.rollback()
-        except sqlite3.Error:
-            pass
-        for source, target in reversed(moved):
-            try:
-                shutil.move(str(target), str(source))
-            except OSError:
-                pass
-        if config_written and config_old_text is not None:
-            try:
-                write_text_atomic(config_path, config_old_text)
-            except OSError:
-                print(
-                    "ERROR: failed to restore config %s" % config_path,
-                    file=sys.stderr,
-                )
-        raise
-    finally:
-        conn.close()
-
     print(
         "Imported: %d run(s), %d item(s)"
-        % (len(new_docs), sum(len(doc.records) for doc in new_docs))
+        % (result.imported_runs, result.imported_items)
     )
-    if moved:
-        print("Archived: %d file(s) -> %s" % (len(moved), archive_dir))
+    if result.archived:
+        print(
+            "Archived: %d file(s) -> %s"
+            % (len(result.archived), doc_dir / "archive")
+        )
     for path, reason in legacy:
         print("Legacy skipped: %s: %s" % (path, reason))
-    for doc in duplicates:
-        print("Duplicate skipped: %s (run_id=%s)" % (doc.path, doc.frontmatter["run_id"]))
-    if config_path is not None:
-        print("Config updated: %s" % config_path)
+    for doc in result.skipped:
+        print("Duplicate skipped: %s (run_id=%s)" % (doc.path, doc.run_id))
+    if args.config:
+        print("Config updated: %s" % args.config)
     else:
+        hint_config = config
+        if not isinstance(hint_config.get("workspace"), str) or not hint_config.get(
+            "workspace"
+        ):
+            hint_config = {"workspace": str(doc_dir.resolve().parent)}
         print(
-            'Next: set config.json log_storage="database" and database='
-            '{"type": "sqlite", "path": "%s"}'
-            % relative_db_path(db_path, {"workspace": str(doc_dir.resolve().parent)})
+            "Next: %s"
+            % connection.database_config_hint(settings, hint_config)
         )
     return 0
 
@@ -1146,11 +936,28 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--require-finished", action="store_true")
     validate_parser.set_defaults(func=cmd_validate)
 
-    migrate_parser = subparsers.add_parser("migrate", help="migrate v1 Markdown logs to SQLite")
+    migrate_parser = subparsers.add_parser(
+        "migrate",
+        help="migrate v1 Markdown logs to a database",
+        description=(
+            "Migrate v1 Markdown logs to SQLite, MySQL, or PostgreSQL. "
+            "MySQL/PostgreSQL require --config and the database drivers."
+        ),
+    )
     migrate_parser.add_argument("--doc-dir", default="doc")
-    migrate_parser.add_argument("--db", help="default: data/scraping-logs.db")
-    migrate_parser.add_argument("--migrations-dir", help="default: <doc-dir>/../data/migrations")
-    migrate_parser.add_argument("--config", help="also update config.json after success")
+    migrate_parser.add_argument(
+        "--db", help="SQLite database path (default: data/scraping-logs.db)"
+    )
+    migrate_parser.add_argument(
+        "--migrations-dir", help="default: <doc-dir>/../data/migrations"
+    )
+    migrate_parser.add_argument(
+        "--config",
+        help=(
+            "read database settings from config.json; required for "
+            "MySQL/PostgreSQL, and updated after a successful migration"
+        ),
+    )
     migrate_parser.add_argument("--dry-run", action="store_true")
     migrate_parser.add_argument("--no-archive", action="store_true")
     migrate_parser.set_defaults(func=cmd_migrate)
@@ -1164,9 +971,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return args.func(args)
     except ToolError as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
-        return 1
-    except sqlite3.Error as exc:
-        print("ERROR: database error: %s" % exc, file=sys.stderr)
         return 1
 
 
