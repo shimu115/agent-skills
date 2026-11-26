@@ -8,6 +8,9 @@
 ## 安装
 把 skill 目录复制到 agent 扫描的位置即可，不需要重启。
 ```sh
+# clone 仓库
+git clone https://github.com/shimu115/agent-skills.git
+cd agent-skills
 # DSH（用户级）
 mkdir -p ~/.dsh/skills
 cp -r skills/media-scraping ~/.dsh/skills/
@@ -17,7 +20,9 @@ cp -r skills/media-scraping ~/.claude/skills/
 ```
 或者用软链，`git pull` 之后立即生效：
 ```sh
+# 只用软连接一次，后续直接 git pull 即可更新
 ln -sfn "$PWD/skills/media-scraping" ~/.dsh/skills/media-scraping
+
 ```
 只想让某个项目用到时，放到 `<项目根>/.dsh/skills/` 或 `<项目根>/.agents/skills/`。
 DSH 默认扫描的 skill 目录：
@@ -48,5 +53,5 @@ Anime/
 - 无法唯一确定时输出 `Needs Manual Review` 并停止，不猜测
 - 禁止复制、移动、删除原始文件；硬链接失败（含跨文件系统）即报错停止，不自动降级为 copy/move
 前置条件：`ffprobe` 可用；下载目录与媒体库位于同一文件系统（硬链接前提）；可访问 Jellyfin 与 TMDB。
-## 约定
-[AGENTS](./AGENTS.md)
+## 开发约定
+仓库自身的维护约定见 [AGENTS.md](AGENTS.md)。

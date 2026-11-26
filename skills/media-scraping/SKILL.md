@@ -7,15 +7,7 @@ description: 整理、重命名、入库媒体库文件时使用。统一 Movies
 
 Version: 1.5
 
-> 本 skill 由 docs/media-scraping-spec-202610112339.md 转换而来，规范内容以该源文件为准；修改规范时请同步两处。
->
-> 1.5（2026-11-16）：新增弹幕命名规则：源文件带 `dm`/`danmu`/`danmaku`/`弹幕` 标记的 `.ass`/`.ssa`/`.xml`，按 `<视频完整主名>.danmu.<ext>` 命名；与普通字幕语言后缀区分（见第 9.1 节）。
->
-> 1.4（2026-11-15）：新增电影系列文件夹规则：同一 TMDB collection 的 ≥2 部电影归入 `<系列名>（系列）/` 下的各自电影文件夹；单部电影保持散放；已入库散放影片不自动移动（见第 5.1 / 22.4 节）。
->
-> 1.3（2026-11-15）：电影文件名也采用发布组风格 `${title}.${year}.${resolution}.${videoCodec}_${audioCodec}-${releaseGroup}.${extension}`（不含 S/E 字段）；多版本电影仍按第 11 节保持与目录名一致的前缀。
->
-> 1.2（2026-11-14）：剧集文件名改为发布组风格 `${title}.${year}.S${season}E${episode}.${resolution}.${videoCodec}_${audioCodec}-${releaseGroup}.${extension}`，`${title}` 使用 TMDB 英文标题；目录命名规则不变。该格式仅适用于新入库或显式要求修正存量的文件（见第 22 节）。
+> 规范内容以本文为准。修改规范时，同步更新上方的 `Version:` 与下方变更记录。
 
 ---
 
