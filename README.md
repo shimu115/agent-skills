@@ -49,7 +49,4 @@ Anime/
 - 禁止复制、移动、删除原始文件；硬链接失败（含跨文件系统）即报错停止，不自动降级为 copy/move
 前置条件：`ffprobe` 可用；下载目录与媒体库位于同一文件系统（硬链接前提）；可访问 Jellyfin 与 TMDB。
 ## 约定
-- 目录名与 frontmatter 的 `name` 保持一致，kebab-case
-- 入口文件必须是 `SKILL.md`（大写）；纯 prompt 的单文件也可是 `<name>.md`
-- 单文件形式必须自包含：正文不能引用 `references/`，否则要用目录包整体复制
-- 若本地保留 `media-scraping` 的原始规范文档，改动规范时需两处同步
+[AGENTS](./AGENTS.md)
